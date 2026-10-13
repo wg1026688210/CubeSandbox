@@ -206,6 +206,18 @@ curl http://10.0.0.5/sandbox/abc123/49999/health
 
 Path mode requires no DNS or certificate setup and supports WebSocket upgrades. It is not suitable for SPAs that load assets from root-absolute paths such as `/static/app.js`; use wildcard DNS for those applications.
 
+### E2B SDKs on a fixed address: header mode
+
+When a request's Host carries no `<port>-<sandbox-id>.<domain>` routing attributes, CubeProxy falls back to the official E2B routing headers: `E2b-Sandbox-Id` (required) and `E2b-Sandbox-Port` (optional, defaults to `49983`). The official E2B SDKs send these headers on every data-plane request, so they can target CubeProxy directly by IP — no wildcard DNS, no SDK patch:
+
+```bash
+export E2B_API_URL=http://<cubeapi-host>:<api-port>
+export E2B_SANDBOX_URL=http://<cubeproxy-host>:<http-port>
+export E2B_API_KEY=<your-api-key>
+```
+
+Host-based routing keeps priority, so existing wildcard-domain traffic is unaffected.
+
 ### Production and browser access: wildcard DNS
 
 Host-based routing uses sandbox domains in the form `<port>-<sandbox-id>.<domain>`. Configure a wildcard A record that points to CubeProxy:

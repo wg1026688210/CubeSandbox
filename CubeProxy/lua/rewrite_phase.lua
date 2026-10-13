@@ -20,7 +20,39 @@ local function parse_port_and_instance_from_host(host)
     return container_port, ins_id
 end
 
+-- E2B-compatible header routing, used by the official SDKs: every envd request
+-- carries E2b-Sandbox-Id (required) and E2b-Sandbox-Port (optional, defaults to
+-- the envd port 49983), so clients can target a fixed gateway address (plain
+-- IP:port, E2B_SANDBOX_URL) without the <port>-<id>.<domain> Host shape.
+-- Returns container_port, ins_id, or nil, nil when the headers are absent or
+-- malformed.
+local function parse_port_and_instance_from_headers()
+    local ins_id = ngx.var.http_e2b_sandbox_id
+    if utils:is_null(ins_id) then
+        return nil, nil
+    end
+    -- Conservative charset/length guard: the id becomes part of Redis route
+    -- keys downstream, so keep it to the shapes sandbox ids actually use.
+    if #ins_id > 253 or not ins_id:match("^[A-Za-z0-9_.-]+$") then
+        return nil, nil
+    end
+    local container_port = ngx.var.http_e2b_sandbox_port
+    if utils:is_null(container_port) then
+        container_port = "49983"
+    end
+    if not container_port:match("^%d+$") then
+        return nil, nil
+    end
+    return container_port, ins_id
+end
+
+-- Host-based routing keeps priority so existing wildcard-domain traffic is
+-- unaffected; headers are only consulted when the Host header carries no
+-- routing attributes (e.g. requests sent to the proxy IP directly).
 local container_port, ins_id = parse_port_and_instance_from_host(ngx.var.http_host)
+if not container_port or not ins_id then
+    container_port, ins_id = parse_port_and_instance_from_headers()
+end
 if not container_port or not ins_id then
     ngx.log(ngx.ERR, "LEVEL_WARN||",
         string.format("request %s invalid Host for port/instance parse: %s",
