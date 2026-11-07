@@ -215,6 +215,10 @@ RUN . /etc/buildenv \
     && cp -r /tmp/protoc/include/* /usr/local/include/ \
     && rm -rf /tmp/protoc /tmp/protoc.zip
 
+# GOPROXY: goproxy.cn for China-reachable Go module fetches (proxy.golang.org is
+# unreachable from mainland networks); direct fallback keeps upstream working.
+ENV GOPROXY="https://goproxy.cn,direct"
+
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
     && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1 \
     && go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@v1.5.1
