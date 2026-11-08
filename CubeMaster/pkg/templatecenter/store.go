@@ -1186,6 +1186,13 @@ func formatUTCRFC3339(ts time.Time) string {
 	return ts.UTC().Format(time.RFC3339)
 }
 
+func formatUTCRFC3339Ptr(ts *time.Time) string {
+	if ts == nil || ts.IsZero() {
+		return ""
+	}
+	return formatUTCRFC3339(*ts)
+}
+
 func composeImageInfo(ref, digest string) string {
 	imageRef := strings.TrimSpace(ref)
 	imageDigest := strings.TrimSpace(digest)

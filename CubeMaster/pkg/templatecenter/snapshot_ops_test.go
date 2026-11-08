@@ -143,7 +143,7 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 			Status:     JobStatusReady,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 
@@ -245,7 +245,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -303,7 +303,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ snapshotmode.Mode, _ int64, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {

@@ -38,6 +38,54 @@ func TestMatchesSnapshotRecordListOptionsHidesTombstone(t *testing.T) {
 	}
 }
 
+func TestExpireSnapshotRecordTombstonesExpiredSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	now := time.Now()
+	expiredAt := now.Add(-time.Second)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-expired", Status: StatusReady, ExpiresAt: &expiredAt}, nil
+	})
+	tombstoned := false
+	patches.ApplyFunc(tombstoneSnapshotRecord, func(_ context.Context, snapshotID string) error {
+		tombstoned = snapshotID == "snap-expired"
+		return nil
+	})
+
+	if err := expireSnapshotRecord(context.Background(), "snap-expired", now); err != nil {
+		t.Fatalf("expireSnapshotRecord: %v", err)
+	}
+	if !tombstoned {
+		t.Fatal("expired snapshot must be tombstoned instead of physically deleted")
+	}
+}
+
+func TestExpireSnapshotRecordKeepsUnexpiredSnapshot(t *testing.T) {
+	oldDB := store.db
+	store.db = &gorm.DB{}
+	defer func() { store.db = oldDB }()
+
+	now := time.Now()
+	expiresAt := now.Add(time.Second)
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(getSnapshotRecord, func(context.Context, string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: "snap-live", Status: StatusReady, ExpiresAt: &expiresAt}, nil
+	})
+	patches.ApplyFunc(tombstoneSnapshotRecord, func(context.Context, string) error {
+		t.Fatal("unexpired snapshot must not be tombstoned")
+		return nil
+	})
+
+	if err := expireSnapshotRecord(context.Background(), "snap-live", now); err != nil {
+		t.Fatalf("expireSnapshotRecord: %v", err)
+	}
+}
+
 func TestMatchesSnapshotRecordListOptionsNameMatchesNameOrID(t *testing.T) {
 	ready := &models.SnapshotRecord{SnapshotID: "snap-1", DisplayName: "prod", Status: StatusReady}
 

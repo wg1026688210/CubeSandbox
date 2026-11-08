@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -34,6 +35,7 @@ const (
 	snapshotSandboxLockPrefix  = "snapshot-sandbox:"
 	snapshotResourceLockPrefix = "snapshot-resource:"
 	snapshotIDPrefix           = "snap-"
+	maxSnapshotTTLSeconds      = int64((1<<63 - 1) / int64(time.Second))
 )
 
 func snapshotRequestLockKey(requestID string) string {
@@ -76,6 +78,7 @@ type snapshotCreateJobRequest struct {
 	Backend         string `json:"backend,omitempty"`
 	Mode            string `json:"mode,omitempty"`
 	SpecFingerprint string `json:"spec_fingerprint,omitempty"`
+	TTLSeconds      int64  `json:"ttl_seconds,omitempty"`
 }
 
 type snapshotRollbackJobRequest struct {
@@ -111,8 +114,15 @@ type snapshotRollbackResult struct {
 // original CreateCubeSandboxReq, which was the original motivation for this
 // refactor.
 func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode) (*sandboxtypes.TemplateImageJobInfo, error) {
+	return SubmitSandboxSnapshotWithTTL(ctx, requestID, sandboxID, hostID, hostIP, displayName, backend, mode, 0)
+}
+
+func SubmitSandboxSnapshotWithTTL(ctx context.Context, requestID, sandboxID, hostID, hostIP, displayName, backend string, mode snapshotmode.Mode, ttlSeconds int64) (*sandboxtypes.TemplateImageJobInfo, error) {
 	if !isReady() {
 		return nil, ErrTemplateStoreNotInitialized
+	}
+	if ttlSeconds < 0 || ttlSeconds > maxSnapshotTTLSeconds {
+		return nil, errors.New("ttl_seconds is out of range")
 	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
@@ -128,6 +138,11 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
 	mode = snapshotmode.Normalize(mode.String())
+	var expiresAt *time.Time
+	if ttlSeconds > 0 {
+		expiry := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
+		expiresAt = &expiry
+	}
 
 	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
@@ -175,7 +190,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			}
 			storedReq.Annotations[constants.CubeAnnotationStorageBackend] = normalizedBackend
 			storedReq.Backend = normalizedBackend
-			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, storedReq) {
+			if !snapshotCreateRequestMatches(existing.RequestJSON, requestID, sandboxID, nodeID, nodeIP, displayName, normalizedBackend, mode, ttlSeconds, storedReq) {
 				return fmt.Errorf("%w: request %s payload does not match existing snapshot create job", ErrTemplateAttemptInProgress, requestID)
 			}
 			jobID = existing.JobID
@@ -215,6 +230,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			Backend:         normalizedBackend,
 			Mode:            mode.String(),
 			SpecFingerprint: fingerprint,
+			TTLSeconds:      ttlSeconds,
 		})
 		if err != nil {
 			return err
@@ -251,6 +267,7 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 			RemoteStatus:              constants.SnapshotRemoteStatus(normalizedBackend),
 			RootfsSizeBytesAtSnapshot: parseSystemDiskSizeBytes(storedReq),
 			Status:                    StatusCreating,
+			ExpiresAt:                 expiresAt,
 		}
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := createSnapshotTx(ctx, tx, snapshotID, storedReq, createReq.InstanceType, constants.GetAppSnapshotVersion(createReq.Annotations), snapRec); err != nil {
@@ -1557,7 +1574,7 @@ func snapshotJobFailedError(info *sandboxtypes.TemplateImageJobInfo) error {
 // canonical spec fingerprint. Because the spec is now fetched from sandboxspec
 // on every call instead of being carried in the payload, we compare via
 // fingerprint rather than deep-equal.
-func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
+func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, displayName, backend string, mode snapshotmode.Mode, ttlSeconds int64, currentSpec *sandboxtypes.CreateCubeSandboxReq) bool {
 	if strings.TrimSpace(raw) == "" {
 		return true
 	}
@@ -1572,6 +1589,9 @@ func snapshotCreateRequestMatches(raw, requestID, sandboxID, nodeID, nodeIP, dis
 		return false
 	}
 	if snapshotmode.Normalize(existing.Mode) != mode {
+		return false
+	}
+	if existing.TTLSeconds != ttlSeconds {
 		return false
 	}
 	if existing.SpecFingerprint == "" {
