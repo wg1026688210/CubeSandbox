@@ -802,15 +802,30 @@ pub struct RestartStatus {
     pub next_restart_at: Option<DateTime<Utc>>,
 }
 
-/// Serialize `endAt` as 9999-12-31T23:59:59Z when the sandbox has no deadline:
-/// the E2B SDK parses endAt as required, so the wire must always carry a value.
+/// 9999-12-31T23:59:59Z: the conventional "never expires" instant. The E2B SDK
+/// parses endAt as required, so never-timeout sandboxes serialize as this
+/// sentinel instead of omitting the field.
+const NEVER_END_AT_TS: i64 = 253_402_300_799;
+
+fn never_timeout_end_at() -> DateTime<Utc> {
+    DateTime::from_timestamp(NEVER_END_AT_TS, 0).expect("9999-12-31T23:59:59Z is a valid timestamp")
+}
+
 fn serialize_end_at<S>(end_at: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    let value =
-        end_at.unwrap_or(DateTime::from_timestamp(253_402_300_799, 0).expect("valid timestamp"));
-    serializer.serialize_some(&value)
+    serializer.serialize_some(&end_at.unwrap_or_else(never_timeout_end_at))
+}
+
+/// Round-trips `serialize_end_at`: a sentinel on the wire maps back to `None`,
+/// so `None -> wire -> None` holds and callers can trust `end_at.is_none()`.
+fn deserialize_end_at<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<DateTime<Utc>>::deserialize(deserializer)?;
+    Ok(value.filter(|v| v.timestamp() != NEVER_END_AT_TS))
 }
 
 /// One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).
@@ -828,7 +843,12 @@ pub struct ListedSandbox {
     pub started_at: DateTime<Utc>,
     /// Projected next-timeout instant; never-timeout sandboxes serialize a
     /// 9999-12-31 sentinel (the E2B SDK requires endAt on every response).
-    #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
+    #[serde(
+        rename = "endAt",
+        default,
+        serialize_with = "serialize_end_at",
+        deserialize_with = "deserialize_end_at"
+    )]
     pub end_at: Option<DateTime<Utc>>,
     /// Echo of the persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -878,7 +898,12 @@ pub struct SandboxDetail {
     pub started_at: DateTime<Utc>,
     /// Projected next-timeout instant; never-timeout sandboxes serialize a
     /// 9999-12-31 sentinel (the E2B SDK requires endAt on every response).
-    #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
+    #[serde(
+        rename = "endAt",
+        default,
+        serialize_with = "serialize_end_at",
+        deserialize_with = "deserialize_end_at"
+    )]
     pub end_at: Option<DateTime<Utc>>,
     /// Echo of the persisted lifecycle config; absent when the spec was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1282,8 +1307,9 @@ fn default_page_limit() -> i32 {
 mod tests {
     use super::{
         ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, ListedSandbox, NewSandbox,
-        NewSandboxV2, ResumedSandbox, SandboxDetail, SandboxNetworkConfig, SandboxState,
-        SetTimeoutRequest, TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
+        NewSandboxV2, ResumedSandbox, SandboxDetail, SandboxLifecycleConfig, SandboxNetworkConfig,
+        SandboxOnTimeout, SandboxState, SetTimeoutRequest, TemplateAliasLookupResponse,
+        UpdateSandboxNetworkRequest,
     };
     use chrono::{DateTime, Utc};
     use validator::Validate;
@@ -1373,6 +1399,47 @@ mod tests {
         }"#;
         let parsed: ListedSandbox = serde_json::from_str(body).unwrap();
         assert!(parsed.end_at.is_none());
+    }
+
+    #[test]
+    fn end_at_round_trips_through_the_sentinel() {
+        for value in [
+            serde_json::to_value(listed(None)).unwrap(),
+            serde_json::to_value(detail(None)).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], SENTINEL);
+            let back: serde_json::Value = value;
+            let parsed: ListedSandbox = serde_json::from_value(back).unwrap();
+            assert!(
+                parsed.end_at.is_none(),
+                "sentinel must deserialize back to None"
+            );
+        }
+    }
+
+    #[test]
+    fn config_echo_uses_e2b_wire_key_names() {
+        let mut sandbox = listed(None);
+        sandbox.lifecycle = Some(SandboxLifecycleConfig {
+            on_timeout: SandboxOnTimeout::Pause,
+            auto_resume: true,
+        });
+        sandbox.allow_internet_access = Some(false);
+        sandbox.network = Some(SandboxNetworkConfig {
+            deny_out: Some(vec!["1.2.3.4/32".into()]),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(sandbox).unwrap();
+
+        assert_eq!(
+            value["lifecycle"],
+            serde_json::json!({"onTimeout": "pause", "autoResume": true})
+        );
+        assert_eq!(value["allowInternetAccess"], false);
+        assert_eq!(
+            value["network"],
+            serde_json::json!({"denyOut": ["1.2.3.4/32"]})
+        );
     }
 
     fn update_parts(body: &str) -> Result<(Option<bool>, Option<SandboxNetworkConfig>), String> {

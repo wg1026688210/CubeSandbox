@@ -1508,13 +1508,15 @@ fn config_echo(
         auto_resume: auto_resume.unwrap_or_default(),
     });
     let allow_internet_access = network.and_then(|n| n.allow_internet_access);
-    let network = network.map(|n| SandboxNetworkConfig {
-        allow_public_traffic: n.allow_public_traffic,
-        allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
-        deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
-        mask_request_host: None,
-        rules: None,
-    });
+    let network = network
+        .map(|n| SandboxNetworkConfig {
+            allow_public_traffic: n.allow_public_traffic,
+            allow_out: (!n.allow_out.is_empty()).then(|| n.allow_out.clone()),
+            deny_out: (!n.deny_out.is_empty()).then(|| n.deny_out.clone()),
+            mask_request_host: None,
+            rules: None,
+        })
+        .filter(|n| !n.is_empty());
     (lifecycle, allow_internet_access, network)
 }
 
@@ -2705,7 +2707,10 @@ mod tests {
             "sandbox_id": "sb-1",
             "status": 1,
             "auto_pause": false,
-            "cube_network_config": { "allowInternetAccess": true }
+            "cube_network_config": {
+                "allowInternetAccess": true,
+                "denyOut": ["1.2.3.4/32"]
+            }
         }))
         .unwrap();
         let listed = from_cubemaster_info(info);
@@ -2714,7 +2719,25 @@ mod tests {
         assert!(matches!(lifecycle.on_timeout, SandboxOnTimeout::Kill));
         assert!(!lifecycle.auto_resume);
         assert_eq!(listed.allow_internet_access, Some(true));
-        assert!(listed.network.is_some());
+        let network = listed.network.expect("network echo");
+        assert_eq!(network.deny_out, Some(vec!["1.2.3.4/32".to_string()]));
+    }
+
+    #[test]
+    fn from_cubemaster_info_omits_empty_network_echo() {
+        // allowInternetAccess is hoisted to the top-level field; a config
+        // carrying nothing else must not surface as "network": {}.
+        let info: SandboxInfo = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sb-1",
+            "status": 1,
+            "auto_pause": false,
+            "cube_network_config": { "allowInternetAccess": true }
+        }))
+        .unwrap();
+        let listed = from_cubemaster_info(info);
+
+        assert_eq!(listed.allow_internet_access, Some(true));
+        assert!(listed.network.is_none());
     }
 
     #[tokio::test]

@@ -291,13 +291,13 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 func decorateSandboxConfig(ctx context.Context, items []*types.SandboxData) {
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
-		if item != nil && item.SandboxID != "" {
+		if item != nil {
 			ids = append(ids, item.SandboxID)
 		}
 	}
 	specs, err := sandboxspec.GetMany(ctx, ids)
-	if err != nil {
-		log.G(ctx).Debugf("GetSandboxInfo: batch read sandbox specs: %v", err)
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+		log.G(ctx).Warnf("GetSandboxInfo: batch read sandbox specs: %v", err)
 	}
 	applySandboxConfig(items, specs)
 }
@@ -308,7 +308,7 @@ func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.Crea
 			continue
 		}
 		spec, ok := specs[item.SandboxID]
-		if !ok || spec == nil {
+		if !ok {
 			continue
 		}
 		item.AutoPause = &spec.AutoPause
@@ -427,6 +427,9 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
 	setPauseLocation(ctx, req, item, rec)
 	rsp.Data = []*types.SandboxData{item}
+	// Config echo must survive the pause overlay: a paused sandbox reports
+	// the same lifecycle/network fields as a running one.
+	decorateSandboxConfig(ctx, rsp.Data)
 	if rsp.Ret == nil {
 		rsp.Ret = &types.Ret{}
 	}

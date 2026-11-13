@@ -37,9 +37,12 @@ func TestApplySandboxConfigEchoesPersistedSpec(t *testing.T) {
 		t.Fatalf("sb-lifecycle-only network = %+v, want nil", lifecycleOnly.CubeNetworkConfig)
 	}
 
-	for i, id := range []string{"sb-no-spec"} {
-		if items[i+2].AutoPause != nil || items[i+2].AutoResume != nil || items[i+2].CubeNetworkConfig != nil {
-			t.Fatalf("%s fields set without a spec", id)
-		}
+	noSpec := items[2]
+	if noSpec.AutoPause != nil || noSpec.AutoResume != nil || noSpec.CubeNetworkConfig != nil {
+		t.Fatalf("sb-no-spec fields = %v/%v/%+v, want all unset", noSpec.AutoPause, noSpec.AutoResume, noSpec.CubeNetworkConfig)
+	}
+
+	if items[3] != nil {
+		t.Fatalf("nil item mutated: %+v", items[3])
 	}
 }

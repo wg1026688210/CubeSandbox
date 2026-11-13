@@ -607,6 +607,11 @@ type SandboxBriefData struct {
 	EndAt           int64              `json:"end_at,omitempty"`
 	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 	RestartStatus   *RestartStatus     `json:"restart_status,omitempty"`
+	// Lifecycle/network config echo, filled from the persisted sandbox spec.
+	// Pointers distinguish "spec not read" from an explicit false.
+	AutoPause         *bool              `json:"auto_pause,omitempty"`
+	AutoResume        *bool              `json:"auto_resume,omitempty"`
+	CubeNetworkConfig *CubeNetworkConfig `json:"cube_network_config,omitempty"`
 }
 
 type GetCubeSandboxReq struct {
