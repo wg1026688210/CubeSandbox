@@ -9,9 +9,6 @@ info:
   license:
     name: ''
   version: 0.1.0
-servers:
-- url: /cubeapi/v1
-  description: CubeAPI SDK/dashboard surface (source of truth generated via `cube-api --export-openapi`)
 paths:
   /health:
     get:
@@ -221,6 +218,50 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '409':
           description: Sandbox is not connectable in its current state, or a lifecycle transition conflicts with the request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/exposed-ports/{containerPort}:
+    get:
+      tags:
+      - handlers::sandboxes
+      operationId: get_sandbox_exposed_port
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox ID
+        required: true
+        schema:
+          type: string
+      - name: containerPort
+        in: path
+        description: Container port declared via the template's expose-port list
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        '200':
+          description: Exposed port endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExposedPortEndpoint'
+        '400':
+          description: Invalid container port
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Sandbox not found or port not exposed
           content:
             application/json:
               schema:
@@ -554,7 +595,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SnapshotInfo'
         '400':
-          description: Snapshot name starts with a reserved tpl-/snap- prefix
+          description: Snapshot name starts with a reserved tpl-/snap- prefix, or the requested snapshot mode is invalid
           content:
             application/json:
               schema:
@@ -571,14 +612,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '503':
-          description: Filesystem-only support could not be verified; retry
+        '500':
+          description: Unexpected backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '500':
-          description: Unexpected backend error
+        '503':
+          description: Filesystem-only support could not be verified; retry
           content:
             application/json:
               schema:
@@ -649,7 +690,7 @@ paths:
           type: string
       - name: name
         in: query
-        description: Filter by snapshot name or ID.
+        description: Filter by snapshot name or ID. (E2B SDK `list_snapshots` gained `name` in v2.33.0)
         required: false
         schema:
           type: string
@@ -1462,6 +1503,22 @@ components:
           format: int32
         message:
           type: string
+    BlockIoQosConfig:
+      type: object
+      properties:
+        iops:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        throughputMiBps:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+      additionalProperties: false
     ConnectSandbox:
       type: object
       description: Request body for POST /sandboxes/{id}/connect.
@@ -1471,7 +1528,9 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted to keep the current value, -1 for no expiry, and a positive value ensures at least that much remaining lifetime. For an already-running sandbox, a shorter positive window is ignored; use POST /sandboxes/{id}/timeout to shorten it. Zero and values below -1 are invalid.
+          description: |-
+            Idle timeout in seconds; omitted to keep the current value, -1 for no expiry.
+            Zero and values below -1 are invalid.
     ConnectSandboxV2:
       allOf:
       - $ref: '#/components/schemas/ConnectSandbox'
@@ -1503,7 +1562,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Deprecated E2B compatibility alias: false means fs-only.'
+          description: Deprecated E2B alias for `memory`.
         memory:
           type:
           - boolean
@@ -1552,7 +1611,9 @@ components:
           type:
           - string
           - 'null'
-          description: CoW backend for this template and its sandboxes/snapshots (xfs | s3). Omitted keeps the historical xfs path.
+          description: |-
+            CoW backend for this template and its sandboxes/snapshots ("xfs" | "s3").
+            Omitted keeps the historical xfs path; normalized/validated by CubeMaster.
         command:
           type:
           - array
@@ -1647,6 +1708,13 @@ components:
           format: int32
           description: HTTP probe port.
           minimum: 0
+        qos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
+            description: |-
+              Optional template-level QoS. Every sandbox created from this template
+              receives the same independent ingress and egress network ceilings.
         registryPassword:
           type:
           - string
@@ -1852,6 +1920,43 @@ components:
 
         A JSON array and a JSON object cannot be confused, so the shape alone
         discriminates.
+    ExposedPortEndpoint:
+      type: object
+      description: |-
+        Exposed-port endpoint returned by GET /sandboxes/{sandboxID}/exposed-ports/{containerPort}.
+
+        `mode` selects the address family of `endpoint`: "host_port" (endpoint is
+        hostIP:hostPort, usable from any caller) or "tap_ip" (endpoint is
+        sandboxIP:containerPort, only meaningful for callers on the sandbox's own
+        node).
+      required:
+      - sandboxID
+      - containerPort
+      - mode
+      - endpoint
+      properties:
+        containerPort:
+          type: integer
+          format: int32
+        endpoint:
+          type: string
+        hostIP:
+          type:
+          - string
+          - 'null'
+        hostPort:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        mode:
+          type: string
+        sandboxID:
+          type: string
+        sandboxIP:
+          type:
+          - string
+          - 'null'
     ForkError:
       type: object
       description: |-
@@ -1929,6 +2034,11 @@ components:
           type:
           - string
           - 'null'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Echo of the persisted internet-access flag; absent when the spec was not read.
         clientID:
           type: string
         cpuCount:
@@ -1951,10 +2061,15 @@ components:
           - 'null'
           format: date-time
           description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+            Projected next-timeout instant; never-timeout sandboxes serialize a
+            9999-12-31 sentinel (the E2B SDK requires endAt on every response).
         envdVersion:
           type: string
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Echo of the persisted lifecycle config; absent when the spec was not read.
         memoryMB:
           type: integer
           format: int32
@@ -1963,6 +2078,11 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfig'
+            description: Echo of the persisted egress config; absent when the spec was not read.
         restartStatus:
           oneOf:
           - type: 'null'
@@ -2041,6 +2161,22 @@ components:
       - info
       - warn
       - error
+    NetworkQosConfig:
+      type: object
+      properties:
+        bandwidthMbps:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+        packetsPerSecond:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 1
+      additionalProperties: false
     NewSandbox:
       type: object
       description: |-
@@ -2088,11 +2224,6 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
-        livenessProbe:
-          oneOf:
-          - type: 'null'
-          - $ref: '#/components/schemas/LivenessProbe'
-            description: Runtime health check applied to the sandbox. Times are seconds.
         lifecycle:
           oneOf:
           - type: 'null'
@@ -2101,6 +2232,11 @@ components:
               Sandbox lifecycle configuration. Maps to e2b's `lifecycle` object so
               callers that already speak e2b can pass through unchanged. Absent
               (None) means today's behaviour: idle sandboxes are killed.
+        livenessProbe:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/LivenessProbe'
+            description: Runtime health check applied to the sandbox. Times are seconds.
         mcp:
           type:
           - object
@@ -2193,6 +2329,18 @@ components:
           description: |-
             Human-readable name for the volume. Optional;
             if omitted a UUIDv4 is generated and used as both name and volume_id.
+    QosConfig:
+      type: object
+      properties:
+        blockIo:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/BlockIoQosConfig'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/NetworkQosConfig'
+      additionalProperties: false
     RebuildTemplateRequest:
       type: object
       description: Body for POST /templates/:id (rebuild).
@@ -2296,7 +2444,10 @@ components:
           - integer
           - 'null'
           format: int32
-          description: Idle timeout in seconds; omitted or 0 keeps the current value, -1 disables expiry, and a positive value starts a new window after resume.
+          description: |-
+            Idle timeout in seconds; None keeps the current value, 0 keeps the
+            current value for this deprecated endpoint, -1 disables expiry, and a
+            positive value starts a new window after resume.
     RollbackRequest:
       type: object
       description: Request body for POST /sandboxes/{id}/rollback.
@@ -2393,8 +2544,17 @@ components:
           type:
           - string
           - 'null'
+        allowInternetAccess:
+          type:
+          - boolean
+          - 'null'
+          description: Echo of the persisted internet-access flag; absent when the spec was not read.
         clientID:
           type: string
+        configuredQos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
         cpuCount:
           type: integer
           format: int32
@@ -2419,14 +2579,19 @@ components:
           - 'null'
           format: date-time
           description: |-
-            Projected next-timeout instant. Omitted for never-timeout sandboxes
-            (no deadline) rather than being misreported as equal to startedAt.
+            Projected next-timeout instant; never-timeout sandboxes serialize a
+            9999-12-31 sentinel (the E2B SDK requires endAt on every response).
         envdAccessToken:
           type:
           - string
           - 'null'
         envdVersion:
           type: string
+        lifecycle:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxLifecycleConfig'
+            description: Echo of the persisted lifecycle config; absent when the spec was not read.
         memoryMB:
           type: integer
           format: int32
@@ -2435,6 +2600,11 @@ components:
           oneOf:
           - type: 'null'
           - $ref: '#/components/schemas/HashMap'
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SandboxNetworkConfig'
+            description: Echo of the persisted egress config; absent when the spec was not read.
         restartStatus:
           oneOf:
           - type: 'null'
@@ -2683,6 +2853,9 @@ components:
           - string
           - 'null'
           format: date-time
+        mode:
+          $ref: '#/components/schemas/SnapshotMode'
+          description: Snapshot artifact mode. Always one of full | fs-only.
         names:
           type: array
           items:
@@ -2700,9 +2873,6 @@ components:
           type: string
         status:
           type: string
-        mode:
-          $ref: '#/components/schemas/SnapshotMode'
-          description: Snapshot artifact mode. Always one of full | fs-only.
         updatedAt:
           type:
           - string
@@ -2853,6 +3023,10 @@ components:
           - boolean
           - 'null'
           description: Whether public internet access is allowed for sandboxes from this template.
+        configuredQos:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/QosConfig'
         createRequest: {}
         createdAt:
           type:
