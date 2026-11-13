@@ -830,6 +830,18 @@ pub struct ListedSandbox {
     /// 9999-12-31 sentinel (the E2B SDK requires endAt on every response).
     #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
     pub end_at: Option<DateTime<Utc>>,
+    /// Echo of the persisted lifecycle config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SandboxLifecycleConfig>,
+    /// Echo of the persisted internet-access flag; absent when the spec was not read.
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_internet_access: Option<bool>,
+    /// Echo of the persisted egress config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<SandboxNetworkConfig>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     /// Exact CPU allocation in millicores. Optional for compatibility with older responses.
@@ -868,6 +880,18 @@ pub struct SandboxDetail {
     /// 9999-12-31 sentinel (the E2B SDK requires endAt on every response).
     #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
     pub end_at: Option<DateTime<Utc>>,
+    /// Echo of the persisted lifecycle config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SandboxLifecycleConfig>,
+    /// Echo of the persisted internet-access flag; absent when the spec was not read.
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_internet_access: Option<bool>,
+    /// Echo of the persisted egress config; absent when the spec was not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<SandboxNetworkConfig>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]
@@ -1287,6 +1311,9 @@ mod tests {
             envd_version: "v1".into(),
             volume_mounts: None,
             restart_status: None,
+            lifecycle: None,
+            allow_internet_access: None,
+            network: None,
         }
     }
 
@@ -1310,6 +1337,9 @@ mod tests {
             volume_mounts: None,
             restart_status: None,
             configured_qos: None,
+            lifecycle: None,
+            allow_internet_access: None,
+            network: None,
         }
     }
 

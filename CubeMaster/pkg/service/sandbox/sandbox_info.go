@@ -241,6 +241,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		return nil
 	}
 	enrichSandboxInfoRestart(ctx, rsp.Data)
+	decorateSandboxConfig(ctx, rsp.Data)
 	if req.HostID != "" {
 		for _, item := range rsp.Data {
 			item.HostID = req.HostID
@@ -281,6 +282,41 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.ExposedPortHostPort = endpoint.HostPort
 	}
 	return nil
+}
+
+// decorateSandboxConfig echoes the persisted lifecycle/network config onto
+// every sandbox item, from the canonical create-request specs. Specs that are
+// missing or fail to read leave the fields empty (omitted on the wire), which
+// matches the behavior before this decoration existed.
+func decorateSandboxConfig(ctx context.Context, items []*types.SandboxData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil && item.SandboxID != "" {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	specs, err := sandboxspec.GetMany(ctx, ids)
+	if err != nil {
+		log.G(ctx).Debugf("GetSandboxInfo: batch read sandbox specs: %v", err)
+	}
+	applySandboxConfig(items, specs)
+}
+
+func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.CreateCubeSandboxReq) {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		spec, ok := specs[item.SandboxID]
+		if !ok || spec == nil {
+			continue
+		}
+		item.AutoPause = &spec.AutoPause
+		item.AutoResume = &spec.AutoResume
+		if spec.CubeNetworkConfig != nil {
+			item.CubeNetworkConfig = spec.CubeNetworkConfig
+		}
+	}
 }
 
 // decorateSandboxQos reports the QoS configuration of one sandbox. The
