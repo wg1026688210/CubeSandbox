@@ -802,6 +802,23 @@ pub struct RestartStatus {
     pub next_restart_at: Option<DateTime<Utc>>,
 }
 
+/// Wire sentinel for a sandbox with no deadline: the v2 API contract (and the
+/// official E2B SDK, which parses `endAt` as required) demands the field on
+/// every response, so `None` is serialized as 2099-01-01T00:00:00Z — the same
+/// convention the test fixtures in this crate use for never-expire sandboxes.
+/// Internal semantics are unchanged: `None` still means "no deadline" off the
+/// wire, and CubeMaster itself returns no end instant for such sandboxes.
+fn never_timeout_end_at() -> DateTime<Utc> {
+    DateTime::from_timestamp(4_070_908_800, 0).expect("2099-01-01T00:00:00Z is a valid timestamp")
+}
+
+fn serialize_end_at<S>(end_at: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_some(&end_at.unwrap_or_else(never_timeout_end_at))
+}
+
 /// One entry in GET /sandboxes (RunningSandbox in OpenAPI spec).
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListedSandbox {
@@ -815,9 +832,11 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
-    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    /// Projected next-timeout instant. Never-timeout sandboxes (no deadline)
+    /// serialize as a 2099 sentinel instead of being omitted, because the v2
+    /// contract and the official E2B SDK require `endAt` on every response.
+    /// `None` still means "no deadline" internally.
+    #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
@@ -853,9 +872,11 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    /// Projected next-timeout instant. Omitted for never-timeout sandboxes
-    /// (no deadline) rather than being misreported as equal to startedAt.
-    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    /// Projected next-timeout instant. Never-timeout sandboxes (no deadline)
+    /// serialize as a 2099 sentinel instead of being omitted, because the v2
+    /// contract and the official E2B SDK require `endAt` on every response.
+    /// `None` still means "no deadline" internally.
+    #[serde(rename = "endAt", serialize_with = "serialize_end_at")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
@@ -1246,11 +1267,107 @@ fn default_page_limit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, NewSandbox, NewSandboxV2,
-        ResumedSandbox, SandboxNetworkConfig, SetTimeoutRequest, TemplateAliasLookupResponse,
-        UpdateSandboxNetworkRequest,
+        serialize_end_at, ConnectSandbox, ConnectSandboxV2, CreateTemplateRequest, ListedSandbox,
+        NewSandbox, NewSandboxV2, ResumedSandbox, SandboxDetail, SandboxNetworkConfig,
+        SandboxState, SetTimeoutRequest, TemplateAliasLookupResponse, UpdateSandboxNetworkRequest,
     };
+    use chrono::{DateTime, Utc};
     use validator::Validate;
+
+    const SENTINEL: &str = "2099-01-01T00:00:00Z";
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn listed(end_at: Option<DateTime<Utc>>) -> ListedSandbox {
+        ListedSandbox {
+            template_id: "tpl-1".into(),
+            alias: None,
+            sandbox_id: "sb-1".into(),
+            client_id: "host-1".into(),
+            started_at: ts(1_700_000_000),
+            end_at,
+            cpu_count: 2,
+            cpu_milli: None,
+            memory_mb: 1024,
+            disk_size_mb: None,
+            metadata: None,
+            state: SandboxState::Running,
+            envd_version: "v1".into(),
+            volume_mounts: None,
+            restart_status: None,
+        }
+    }
+
+    fn detail(end_at: Option<DateTime<Utc>>) -> SandboxDetail {
+        SandboxDetail {
+            template_id: "tpl-1".into(),
+            alias: None,
+            sandbox_id: "sb-1".into(),
+            client_id: "host-1".into(),
+            started_at: ts(1_700_000_000),
+            end_at,
+            envd_version: "v1".into(),
+            envd_access_token: None,
+            domain: None,
+            cpu_count: 2,
+            cpu_milli: None,
+            memory_mb: 1024,
+            disk_size_mb: None,
+            metadata: None,
+            state: SandboxState::Running,
+            volume_mounts: None,
+            restart_status: None,
+            configured_qos: None,
+        }
+    }
+
+    #[test]
+    fn never_timeout_serializes_sentinel_end_at() {
+        // The official E2B SDK parses endAt as required; a missing field
+        // crashes Sandbox.list()/get_info() for never-timeout sandboxes.
+        for value in [
+            serde_json::to_value(listed(None)).unwrap(),
+            serde_json::to_value(detail(None)).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], SENTINEL);
+        }
+    }
+
+    #[test]
+    fn real_end_at_is_preserved() {
+        let deadline = ts(1_800_000_000);
+        for value in [
+            serde_json::to_value(listed(Some(deadline))).unwrap(),
+            serde_json::to_value(detail(Some(deadline))).unwrap(),
+        ] {
+            assert_eq!(value["endAt"], "2027-01-15T08:00:00Z");
+        }
+    }
+
+    #[test]
+    fn missing_end_at_still_deserializes_as_none() {
+        // Old responses (and CubeMaster itself) omit endAt for never-timeout
+        // sandboxes; inbound compatibility must survive the wire change.
+        let body = r#"{
+            "templateID": "tpl-1", "sandboxID": "sb-1", "clientID": "host-1",
+            "startedAt": "2023-11-14T22:13:20Z", "cpuCount": 2, "memoryMB": 1024,
+            "envdVersion": "v1", "state": "running"
+        }"#;
+        let parsed: ListedSandbox = serde_json::from_str(body).unwrap();
+        assert!(parsed.end_at.is_none());
+    }
+
+    #[test]
+    fn end_at_serializer_emits_some() {
+        // serialize_some (not serialize_none) so the wire always carries the key.
+        #[derive(serde::Serialize)]
+        struct Probe(#[serde(serialize_with = "serialize_end_at")] Option<DateTime<Utc>>);
+
+        let v = serde_json::to_value(Probe(None)).unwrap();
+        assert_eq!(v, SENTINEL);
+    }
 
     fn update_parts(body: &str) -> Result<(Option<bool>, Option<SandboxNetworkConfig>), String> {
         serde_json::from_str::<UpdateSandboxNetworkRequest>(body)

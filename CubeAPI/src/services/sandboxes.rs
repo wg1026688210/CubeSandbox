@@ -334,7 +334,8 @@ impl SandboxService {
         let started_at = d.started_at.unwrap_or_else(chrono::Utc::now);
         // Leave end_at as None for never-timeout sandboxes (CubeMaster returns
         // no end instant) instead of collapsing it onto started_at, which
-        // would read as "already expired".
+        // would read as "already expired". The wire layer maps None to a
+        // 2099 sentinel so the v2 contract / E2B SDK always see an endAt.
         let end_at = d.end_at;
 
         let envd_version = envd_version_from_annotations(&d.annotations);
