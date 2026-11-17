@@ -863,7 +863,7 @@ export interface components {
              * Format: date-time
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt: string;
+            endAt?: string | null;
             envdVersion: string;
             /**
              * Format: int32
@@ -878,6 +878,11 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            allowInternetAccess?: boolean | null;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         LivenessHTTPGet: {
             path?: string | null;
@@ -1204,7 +1209,7 @@ export interface components {
              * Format: date-time
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt: string;
+            endAt?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */
@@ -1222,6 +1227,10 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            allowInternetAccess?: boolean | null;
+            endAtStatus?: string | null;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         /**
          * @description Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
@@ -1305,6 +1314,17 @@ export interface components {
              *     attachment. Defaults to false when omitted.
              */
             readOnly?: boolean;
+        };
+        SandboxNetworkConfigEcho: {
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            maskRequestHost?: string | null;
+            /**
+             * @description True when the persisted config carried egress rules, which never
+             *     appear on the wire (plaintext inject secrets).
+             */
+            rulesPresent?: boolean | null;
         };
         /**
          * @description Body for PUT /templates/:id/alias (set / modify / clear alias).
