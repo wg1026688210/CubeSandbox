@@ -849,6 +849,8 @@ export interface components {
         /** @description One entry in GET /sandboxes (RunningSandbox in OpenAPI spec). */
         ListedSandbox: {
             alias?: string | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
             clientID: string;
             /** Format: int32 */
             cpuCount: number;
@@ -863,14 +865,18 @@ export interface components {
              * Format: date-time
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt?: string | null;
+            endAt: string;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
             envdVersion: string;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -878,11 +884,6 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
-            allowInternetAccess?: boolean | null;
-            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
-            endAtStatus?: string | null;
-            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
-            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         LivenessHTTPGet: {
             path?: string | null;
@@ -1193,6 +1194,8 @@ export interface components {
         /** @description Detailed sandbox info returned by GET /sandboxes/{sandboxID}. */
         SandboxDetail: {
             alias?: string | null;
+            /** @description Persisted internet-access flag; absent when the spec was not read. */
+            allowInternetAccess?: boolean | null;
             clientID: string;
             configuredQos?: null | components["schemas"]["QosConfig"];
             /** Format: int32 */
@@ -1209,17 +1212,21 @@ export interface components {
              * Format: date-time
              * @description Never-timeout sandboxes serialize a 9999-12-31 sentinel (E2B SDK requires endAt).
              */
-            endAt?: string | null;
+            endAt: string;
+            /** @description "deadline" | "never" | "unknown"; absent when the backend did not report it. */
+            endAtStatus?: string | null;
             envdAccessToken?: string | null;
             envdVersion: string;
             /** @description Stored status or exit reason for the primary container. Omitted when unavailable. */
             errorReason?: string;
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
             /**
              * Format: int32
              * @description Historical field name; the value is memory in MiB.
              */
             memoryMB: number;
             metadata?: null | components["schemas"]["HashMap"];
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
             restartStatus?: null | components["schemas"]["RestartStatus"];
             sandboxID: string;
             /** Format: date-time */
@@ -1227,10 +1234,6 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
-            allowInternetAccess?: boolean | null;
-            endAtStatus?: string | null;
-            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
-            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         /**
          * @description Sandbox lifecycle configuration. Mirrors the e2b SDK's `lifecycle` object —
