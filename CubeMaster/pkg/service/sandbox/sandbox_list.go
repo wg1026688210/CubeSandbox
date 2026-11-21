@@ -122,7 +122,7 @@ func listSandbox(ctx context.Context, req *types.ListCubeSandboxReq, failOnCubel
 		}
 	}
 
-	enrichSandboxListBackends(ctx, rsp.Data)
+	enrichSandboxList(ctx, rsp.Data)
 	mergePauseBindings(ctx, req, rsp)
 	enrichSandboxListEndAts(ctx, rsp.Data)
 	enrichSandboxListRestart(ctx, rsp.Data)
@@ -236,6 +236,12 @@ func applyPauseBindings(ctx context.Context, items []*types.SandboxBriefData, re
 		if item == nil || !labelsMatchSelector(item.Labels, opts.labelSelector) || matchFilter(item.Labels) {
 			continue
 		}
+		if spec != nil {
+			item.AutoPause = &spec.AutoPause
+			item.AutoResume = &spec.AutoResume
+			item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
+			item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
+		}
 		if spec == nil {
 			recordPauseViewWithoutSpec("list")
 		}
@@ -313,42 +319,56 @@ func enrichSandboxListEndAts(ctx context.Context, items []*types.SandboxBriefDat
 		}
 		if endAt, ok := endAts[item.SandboxID]; ok {
 			item.EndAt = endAt
+			// EndAtStatus was derived while EndAt was still 0 (enrich runs
+			// before this fill); upgrade a real deadline, leave the
+			// provisional never/unknown rows alone.
+			// Only rows whose spec was read carry a provisional status;
+			// leave synthesized/unknown rows untouched so a spec-store
+			// failure reads the same on list as it does on detail.
+			if endAt > 0 && item.EndAtStatus != "" {
+				item.EndAtStatus = types.EndAtStatusDeadline
+			}
 		}
 	}
 }
 
-// enrichSandboxListBackends fills Backend from t_cube_sandbox_spec (DB source of
-// truth for create-time xfs|s3). Missing specs leave Backend empty.
-func enrichSandboxListBackends(ctx context.Context, items []*types.SandboxBriefData) {
-	var ids []string
+// enrichSandboxList fills Backend and echoes the persisted lifecycle/network
+// config from the canonical create-request specs, sharing ONE batch read
+// (listSandbox is a hot path; both fills consume the same specs). Rows
+// synthesized later by mergePauseBindings are echoed at synthesis time from
+// the spec already in hand. Unreadable specs leave the fields empty.
+func enrichSandboxList(ctx context.Context, items []*types.SandboxBriefData) {
+	ids := make([]string, 0, len(items))
 	for _, item := range items {
-		if item == nil || item.SandboxID == "" || strings.TrimSpace(item.Backend) != "" {
+		if item == nil || item.SandboxID == "" {
 			continue
 		}
-		if item.Annotations != nil {
+		if item.Annotations != nil && strings.TrimSpace(item.Backend) == "" {
 			if b := strings.TrimSpace(item.Annotations[constants.CubeAnnotationStorageBackend]); b != "" {
 				item.Backend = b
-				continue
 			}
 		}
 		ids = append(ids, item.SandboxID)
 	}
-	if len(ids) == 0 {
-		return
-	}
 	specs, err := sandboxspec.GetMany(ctx, ids)
-	for _, item := range items {
-		if item == nil || strings.TrimSpace(item.Backend) != "" {
-			continue
-		}
-		spec := specs[item.SandboxID]
-		if spec == nil {
-			continue
-		}
-		item.Backend = strings.TrimSpace(spec.Backend)
-	}
 	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
-		log.G(ctx).Warnf("ListSandbox: read sandbox specs for backend: %v", err)
+		log.G(ctx).Warnf("ListSandbox: read sandbox specs: %v", err)
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		spec, ok := specs[item.SandboxID]
+		if !ok || spec == nil {
+			continue
+		}
+		if strings.TrimSpace(item.Backend) == "" {
+			item.Backend = strings.TrimSpace(spec.Backend)
+		}
+		item.AutoPause = &spec.AutoPause
+		item.AutoResume = &spec.AutoResume
+		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
+		item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
 	}
 }
 

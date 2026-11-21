@@ -54,7 +54,9 @@ func TestCanonicalizeRequestStripsTransientSnapshotAnnotations(t *testing.T) {
 	assert.Equal(t, "preserve", out.Annotations["unrelated-annotation"],
 		"unrelated annotations must be preserved")
 	assert.Equal(t, "me", out.Labels["keep"])
-	assert.Zero(t, out.Timeout)
+	// Timeout is kept: the never-timeout marker is the only signal that can
+	// distinguish a true never-timeout from a failed deadline lookup.
+	assert.Equal(t, 30, *out.Timeout)
 }
 
 // TestCanonicalizeRequestHandlesNilAnnotations confirms nil maps are forced

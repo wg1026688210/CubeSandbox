@@ -338,6 +338,13 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            allowInternetAccess?: boolean | null;
+            /** @description What the endAt value means: "deadline" (a real instant), "never" (true never-timeout) or "unknown" (the deadline lookup failed). Absent when the backend did not report it. */
+            endAtStatus?: string | null;
+            /** @description Persisted lifecycle config; absent when the spec was not read. */
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            /** @description Persisted egress config; absent when the spec was not read or when it\ncarried only egress rules (rules never appear on the wire). */
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         /** @enum {string} */
         LogLevel: "debug" | "info" | "warn" | "error";
@@ -454,6 +461,13 @@ export interface components {
             state: components["schemas"]["SandboxState"];
             templateID: string;
             volumeMounts?: components["schemas"]["SandboxVolumeMount"][] | null;
+            allowInternetAccess?: boolean | null;
+            /** @description What the endAt value means: "deadline" (a real instant), "never" (true never-timeout) or "unknown" (the deadline lookup failed). Absent when the backend did not report it. */
+            endAtStatus?: string | null;
+            /** @description Persisted lifecycle config; absent when the spec was not read. */
+            lifecycle?: null | components["schemas"]["SandboxLifecycleConfig"];
+            /** @description Persisted egress config; absent when the spec was not read or when it\ncarried only egress rules (rules never appear on the wire). */
+            network?: null | components["schemas"]["SandboxNetworkConfigEcho"];
         };
         /** @description Structured log entry (v2 logs). */
         SandboxLogEntry: {
@@ -481,6 +495,27 @@ export interface components {
             /** CubeSandbox extension: mount this volume read-only for this sandbox attachment. Defaults to false when omitted. */
             readOnly?: boolean;
         };
+        SandboxLifecycleConfig: {
+            /**
+             * @description Auto-resume on activity. Defaults to false. Only meaningful when
+             *     `on_timeout` is set to "pause".
+             */
+            autoResume?: boolean;
+            /** @description "kill" (default) | "pause". */
+            onTimeout?: components["schemas"]["SandboxOnTimeout"];
+        };
+        SandboxNetworkConfigEcho: {
+            allowOut?: string[] | null;
+            allowPublicTraffic?: boolean | null;
+            denyOut?: string[] | null;
+            maskRequestHost?: string | null;
+            /**
+             * @description True when the persisted config carried egress rules, which never
+             *     appear on the wire (plaintext inject secrets).
+             */
+            rulesPresent?: boolean | null;
+        };
+        SandboxOnTimeout: "kill" | "pause";
         TemplateAliasLookupResponse: {
             public: boolean;
             templateID: string;

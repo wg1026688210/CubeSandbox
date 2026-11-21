@@ -241,6 +241,7 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		return nil
 	}
 	enrichSandboxInfoRestart(ctx, rsp.Data)
+	decorateSandboxConfig(ctx, rsp.Data)
 	if req.HostID != "" {
 		for _, item := range rsp.Data {
 			item.HostID = req.HostID
@@ -281,6 +282,48 @@ func decorateSandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq, rsp 
 		item.ExposedPortHostPort = endpoint.HostPort
 	}
 	return nil
+}
+
+// decorateSandboxConfig echoes the persisted lifecycle/network config from the
+// canonical create-request specs; unreadable specs leave the fields empty.
+func decorateSandboxConfig(ctx context.Context, items []*types.SandboxData) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.SandboxID)
+		}
+	}
+	specs, err := sandboxspec.GetMany(ctx, ids)
+	if err != nil && !errors.Is(err, sandboxspec.ErrSandboxSpecStoreNotReady) {
+		log.G(ctx).Warnf("GetSandboxInfo: batch read sandbox specs: %v", err)
+	}
+	applySandboxConfig(items, specs)
+}
+
+func applySandboxConfig(items []*types.SandboxData, specs map[string]*types.CreateCubeSandboxReq) {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		spec, ok := specs[item.SandboxID]
+		if !ok {
+			continue
+		}
+		item.AutoPause = &spec.AutoPause
+		item.AutoResume = &spec.AutoResume
+		item.CubeNetworkConfig = echoNetworkConfig(spec.CubeNetworkConfig)
+		item.EndAtStatus = endAtStatusFor(item.EndAt, spec.Timeout)
+	}
+}
+
+func endAtStatusFor(endAt int64, timeout *int) string {
+	if endAt > 0 {
+		return types.EndAtStatusDeadline
+	}
+	if timeout != nil && *timeout == types.NeverTimeout {
+		return types.EndAtStatusNever
+	}
+	return types.EndAtStatusUnknown
 }
 
 // decorateSandboxQos reports the QoS configuration of one sandbox. The
@@ -344,6 +387,7 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		return false
 	}
 	item := findSandboxData(rsp.Data, req.SandboxID)
+	var loadedSpec *types.CreateCubeSandboxReq
 	var observed int32
 	if item != nil {
 		observed = item.Status
@@ -375,11 +419,11 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 		if req.HostID == "" && !pauseBindingOnHost(rec, locatedHost) {
 			return false
 		}
-		spec := loadSandboxSpec(ctx, req.SandboxID)
-		if spec == nil {
+		loadedSpec = loadSandboxSpec(ctx, req.SandboxID)
+		if loadedSpec == nil {
 			recordPauseViewWithoutSpec("info")
 		}
-		item = sandboxDataFromSpec(req.SandboxID, spec)
+		item = sandboxDataFromSpec(req.SandboxID, loadedSpec)
 		item.EndAt = LookupSandboxEndAt(ctx, req.SandboxID)
 		// The binding only knows when the pause happened; the durable spec
 		// carries when the sandbox was created.
@@ -391,6 +435,14 @@ func applyPauseBindingToInfo(ctx context.Context, req *types.GetCubeSandboxReq,
 	item.Annotations = overlayPauseAnnotations(item.Annotations, rec, view.pauseErr)
 	setPauseLocation(ctx, req, item, rec)
 	rsp.Data = []*types.SandboxData{item}
+	// The pause overlay replaced rsp.Data, so re-apply the config echo. The
+	// synthesized branch already holds the loaded spec; the overlay branch
+	// (item came from the node) still needs the batch read.
+	if loadedSpec != nil {
+		applySandboxConfig(rsp.Data, map[string]*types.CreateCubeSandboxReq{item.SandboxID: loadedSpec})
+	} else if item != nil {
+		decorateSandboxConfig(ctx, rsp.Data)
+	}
 	if rsp.Ret == nil {
 		rsp.Ret = &types.Ret{}
 	}

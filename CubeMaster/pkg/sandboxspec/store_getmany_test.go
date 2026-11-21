@@ -148,3 +148,25 @@ func TestGetManyFillsBackendFromColumn(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, constants.SnapshotBackendXFS, one.Backend)
 }
+
+func TestPutGetRoundTripsTimeout(t *testing.T) {
+	setupSpecStore(t)
+	never := -1
+	finite := 600
+	for name, timeout := range map[string]*int{"never": &never, "finite": &finite} {
+		req := &sandboxtypes.CreateCubeSandboxReq{
+			InstanceType: "cubebox",
+			Timeout:      timeout,
+			InsId:        "transient-host-pin",
+		}
+		require.NoError(t, Put(context.Background(), "sb-"+name, req, PutOptions{}))
+		got, err := Get(context.Background(), "sb-"+name)
+		require.NoError(t, err)
+		// The never-timeout marker must survive canonicalization: it is the
+		// only signal that distinguishes "no deadline" from a failed lookup.
+		require.NotNil(t, got.Timeout, "%s: Timeout stripped from stored spec", name)
+		require.Equal(t, *timeout, *got.Timeout, "%s: Timeout changed in storage", name)
+		// Transient fields are still stripped.
+		require.Empty(t, got.InsId)
+	}
+}
