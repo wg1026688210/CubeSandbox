@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use eventfd::{eventfd, EfdFlags};
 use nix::sys::eventfd;
 use std::fs::{self, File};
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 
 use crate::pipestream::PipeStream;
@@ -148,19 +148,20 @@ async fn register_memory_event(
     let path = Path::new(&cg_dir).join(event_name);
     let event_file = File::open(path.clone())?;
 
-    let eventfd = eventfd(0, EfdFlags::EFD_CLOEXEC)?;
+    // Own the eventfd from creation so an error below cannot leak it.
+    let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd(0, EfdFlags::EFD_CLOEXEC)?) };
 
     let event_control_path = Path::new(&cg_dir).join("cgroup.event_control");
 
     let data = if arg.is_empty() {
-        format!("{} {}", eventfd, event_file.as_raw_fd())
+        format!("{} {}", eventfd.as_raw_fd(), event_file.as_raw_fd())
     } else {
-        format!("{} {} {}", eventfd, event_file.as_raw_fd(), arg)
+        format!("{} {} {}", eventfd.as_raw_fd(), event_file.as_raw_fd(), arg)
     };
 
     fs::write(&event_control_path, data)?;
 
-    let mut eventfd_stream = unsafe { PipeStream::from_raw_fd(eventfd) };
+    let mut eventfd_stream = PipeStream::new(eventfd.into_raw_fd())?;
 
     let (sender, receiver) = tokio::sync::mpsc::channel(100);
     let containere_id = cid.to_string();

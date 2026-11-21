@@ -10,7 +10,7 @@ use std::{
     fmt, io,
     io::{Read, Result, Write},
     mem,
-    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -24,11 +24,11 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-struct StreamFd(RawFd);
+struct StreamFd(OwnedFd);
 
 impl io::Read for &StreamFd {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match unistd::read(self.0, buf) {
+        match unistd::read(self.0.as_raw_fd(), buf) {
             Ok(l) => Ok(l),
             Err(e) => Err(e.into()),
         }
@@ -37,7 +37,7 @@ impl io::Read for &StreamFd {
 
 impl io::Write for &StreamFd {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match unistd::write(self.0, buf) {
+        match unistd::write(self.0.as_raw_fd(), buf) {
             Ok(l) => Ok(l),
             Err(e) => Err(e.into()),
         }
@@ -48,32 +48,20 @@ impl io::Write for &StreamFd {
     }
 }
 
-impl StreamFd {
-    fn close(&mut self) -> io::Result<()> {
-        match unistd::close(self.0) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-}
-
-impl Drop for StreamFd {
-    fn drop(&mut self) {
-        self.close().ok();
-    }
-}
-
 impl AsRawFd for StreamFd {
     fn as_raw_fd(&self) -> RawFd {
-        self.0
+        self.0.as_raw_fd()
     }
 }
 
 pub struct PipeStream(AsyncFd<StreamFd>);
 
 impl PipeStream {
+    /// Takes ownership of `fd`, which is closed when the stream is dropped.
     pub fn new(fd: RawFd) -> Result<Self> {
         set_nonblocking(fd);
+        // SAFETY: ownership of `fd` transfers to the returned stream.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         Ok(Self(AsyncFd::new(StreamFd(fd))?))
     }
 
@@ -90,9 +78,10 @@ impl AsRawFd for PipeStream {
 
 impl IntoRawFd for PipeStream {
     fn into_raw_fd(self) -> RawFd {
-        let fd = self.as_raw_fd();
-        mem::forget(self);
-        fd
+        // into_inner deregisters the fd from the tokio reactor; without this
+        // the fd stays registered and re-wrapping it in a PipeStream fails
+        // with EEXIST.
+        self.0.into_inner().0.into_raw_fd()
     }
 }
 
@@ -173,6 +162,18 @@ mod tests {
     use super::*;
     use nix::fcntl::OFlag;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn test_into_raw_fd_deregisters_from_reactor() {
+        let (rfd, _wfd) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let stream = PipeStream::new(rfd).unwrap();
+        let fd = stream.into_raw_fd();
+
+        // The fd must be deregistered from the reactor: re-wrapping it in a
+        // PipeStream must not fail with EEXIST.
+        let stream2 = PipeStream::new(fd).unwrap();
+        drop(stream2);
+    }
 
     #[tokio::test]
     // Shutdown should never close the inner fd.
