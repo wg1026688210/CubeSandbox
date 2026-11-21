@@ -10,7 +10,13 @@ import os
 import pytest
 
 from framework.assertions import assert_command_ok
-from framework.capabilities import NETWORK_DNS_ALLOW
+from framework.capabilities import NETWORK_DNS_ALLOW, NETWORK_DYNAMIC_UPDATE
+from framework.network_probe import (
+    TCP_TARGET_IP,
+    assert_tcp_blocked,
+    assert_tcp_reachable,
+    tcp_probe_command,
+)
 
 ALLOWED_DOMAIN = os.environ.get("SDK_E2E_DNS_ALLOW_DOMAIN", "example.com")
 ALLOWED_WILDCARD = os.environ.get("SDK_E2E_DNS_ALLOW_WILDCARD", "*.example.com")
@@ -201,3 +207,162 @@ def test_wildcard_domain_allow_matches_subdomain_not_apex(sdk_sandbox, sdk_e2e_c
         timeout=sdk_e2e_config.command_timeout,
     )
     _assert_domain_blocked_after_resolve(other, BLOCKED_DOMAIN)
+
+
+@pytest.mark.requires_capability(NETWORK_DYNAMIC_UPDATE)
+@pytest.mark.sandbox_create_options(
+    allow_internet_access=False,
+    network={"allow_out": [TCP_TARGET_IP], "deny_out": ["0.0.0.0/0"]},
+)
+def test_update_from_pure_ip_to_first_domain_policy_learns_dns(
+    sdk_sandbox,
+    sdk_e2e_config,
+):
+    """Switching from an IP-only policy to the first domain policy enables learning.
+
+    Existing coverage installs domain rules at create time. Here the sandbox is
+    born with an IP-only policy, so DNS learning is disabled; the update that
+    installs the first domain rule must also switch learning on. The probe then
+    resolves the domain over plaintext UDP/53 and connects over TCP, so a
+    learned A answer is the only thing that can make the connect succeed.
+    """
+    assert_tcp_reachable(
+        sdk_sandbox.run_command(
+            tcp_probe_command(
+                TCP_TARGET_IP,
+                timeout=sdk_e2e_config.network_probe_timeout,
+            ),
+            timeout=sdk_e2e_config.command_timeout,
+        ),
+        TCP_TARGET_IP,
+    )
+
+    sdk_sandbox.update_network(
+        network={
+            "allow_internet_access": False,
+            "allow_out": [ALLOWED_DOMAIN],
+            "deny_out": ["0.0.0.0/0"],
+        }
+    )
+
+    resolved_and_probed = sdk_sandbox.run_command(
+        _resolve_and_probe_command(
+            ALLOWED_DOMAIN,
+            DOMAIN_TCP_PORT,
+            sdk_e2e_config.network_probe_timeout,
+        ),
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    _assert_domain_reachable(resolved_and_probed, ALLOWED_DOMAIN)
+
+
+def _resolved_ipv4_addrs(result) -> list[str]:
+    """Return the IPv4 addresses printed on the RESOLVED: line."""
+    assert_command_ok(result)
+    prefix = "RESOLVED:"
+    resolved = next(
+        (
+            line.strip()[len(prefix):]
+            for line in result.stdout.splitlines()
+            if line.strip().startswith(prefix)
+        ),
+        "",
+    )
+    return [addr for addr in resolved.split(",") if addr]
+
+
+# After an update that removes the only domain rule, the learned IPs must leave
+# allow_out_v3 too. Otherwise the address stays reachable under a policy that
+# never mentions it. The replacement allow_out is IP-only, which also turns DNS
+# learning off.
+REVOCATION_REPLACEMENT_ALLOW_OUT = ["203.0.113.254"]
+
+
+@pytest.mark.requires_capability(NETWORK_DYNAMIC_UPDATE)
+@pytest.mark.sandbox_create_options(
+    allow_internet_access=False,
+    network={
+        "allow_out": [ALLOWED_DOMAIN],
+        "deny_out": ["0.0.0.0/0"],
+    },
+)
+def test_removing_domain_revokes_learned_ip(sdk_sandbox, sdk_e2e_config):
+    """Deleting a domain rule retires the IPs it taught; direct connect fails."""
+    learned = sdk_sandbox.run_command(
+        _resolve_and_probe_command(
+            ALLOWED_DOMAIN,
+            DOMAIN_TCP_PORT,
+            sdk_e2e_config.network_probe_timeout,
+        ),
+        timeout=sdk_e2e_config.command_timeout,
+    )
+    _assert_domain_reachable(learned, ALLOWED_DOMAIN)
+    addrs = _resolved_ipv4_addrs(learned)
+    assert addrs, f"{ALLOWED_DOMAIN} resolved to no IPv4 address: {learned.stdout!r}"
+
+    sdk_sandbox.update_network(
+        network={
+            "allow_internet_access": False,
+            "allow_out": list(REVOCATION_REPLACEMENT_ALLOW_OUT),
+            "deny_out": ["0.0.0.0/0"],
+        }
+    )
+
+    for addr in addrs:
+        assert_tcp_blocked(
+            sdk_sandbox.run_command(
+                tcp_probe_command(
+                    addr,
+                    port=DOMAIN_TCP_PORT,
+                    timeout=sdk_e2e_config.network_probe_timeout,
+                ),
+                timeout=sdk_e2e_config.command_timeout,
+            ),
+            addr,
+            DOMAIN_TCP_PORT,
+        )
+
+
+# Known-unsupported DNS learning paths. These are skipped rather than asserted
+# so the suite does not report a false pass for behaviour that never installs an
+# allow row. Each reason is the design boundary, not an environment limitation.
+
+
+@pytest.mark.skip(
+    reason=(
+        "by design: DNS learning only observes plaintext UDP/53 IN A answers; "
+        "a TCP/53 response never installs an allow_out_v3 row"
+    )
+)
+def test_dns_learning_over_tcp_53_is_unsupported():
+    """Kept as an explicit documented gap, not executed."""
+
+
+@pytest.mark.skip(
+    reason=(
+        "by design: only resolver responses are learned; a guest-side cached IP "
+        "never reaches the datapath and therefore has no allow row"
+    )
+)
+def test_dns_learning_from_cached_ip_is_unsupported():
+    """Kept as an explicit documented gap, not executed."""
+
+
+@pytest.mark.skip(
+    reason=(
+        "by design: only IPv4 A answers are learned; AAAA/IPv6 answers install "
+        "nothing and the egress datapath is IPv4-only"
+    )
+)
+def test_dns_learning_of_aaaa_is_unsupported():
+    """Kept as an explicit documented gap, not executed."""
+
+
+@pytest.mark.skip(
+    reason=(
+        "by design: DoH/DoT traffic is opaque; domain:port targets must use L7 "
+        "rules instead of DNS learning"
+    )
+)
+def test_dns_learning_over_doh_or_dot_is_unsupported():
+    """Kept as an explicit documented gap, not executed."""
