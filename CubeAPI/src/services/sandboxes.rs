@@ -4132,6 +4132,32 @@ mod tests {
     }
 
     #[test]
+    fn network_context_forwards_port_qualified_allow_out_unchanged() {
+        // CubeAPI does not interpret IPv4:port; CubeVS owns that parse. Pin the
+        // pass-through so a future validator cannot silently drop the port and
+        // widen a single-port rule to the whole host.
+        let targets = vec![
+            "1.2.3.4:8080".to_string(),
+            "1.2.3.4/32:8080".to_string(),
+            "1.2.3.4".to_string(),
+        ];
+        let context = build_cube_network_config(
+            Some(false),
+            Some(&SandboxNetworkConfig {
+                allow_out: Some(targets.clone()),
+                deny_out: Some(vec!["0.0.0.0/0".to_string()]),
+                ..Default::default()
+            }),
+        )
+        .expect("port-qualified allow_out must be accepted")
+        .expect("context should exist");
+
+        assert_eq!(context.allow_out, targets);
+        let json = serde_json::to_value(&context).expect("serialize");
+        assert_eq!(json["allowOut"], serde_json::json!(targets));
+    }
+
+    #[test]
     fn network_context_forwards_egress_rules() {
         let context = build_cube_network_config(
             None,

@@ -97,6 +97,7 @@ type L7Port struct {
 // plus the L7 flags and (port, scheme) set the control plane attached to it.
 type AllowOutRule struct {
 	CIDR  string   `json:"cidr"`
+	Port  uint16   `json:"port,omitempty"`
 	Flags uint8    `json:"flags,omitempty"`
 	Ports []L7Port `json:"ports,omitempty"`
 }
@@ -739,6 +740,7 @@ func (r AllowOutRule) policyEntry() (allowOutPolicyEntry, error) {
 	}
 	return allowOutPolicyEntry{
 		key:    key,
+		port:   r.Port,
 		flags:  r.Flags,
 		ports:  portsToL7Entries(r.Ports),
 		source: r.CIDR,
@@ -750,6 +752,7 @@ func allowOutRulesFromPlan(entries []allowOutPolicyEntry) []AllowOutRule {
 	for _, e := range entries {
 		out = append(out, AllowOutRule{
 			CIDR:  formatLPMKey(e.key),
+			Port:  e.port,
 			Flags: e.flags,
 			Ports: l7EntriesToPorts(e.ports),
 		})
@@ -1267,9 +1270,9 @@ func denyOutFromMirror(entries []denyMirrorEntry) []DenyOutRule {
 // adoptAllowInputs splits a live allow_out_v3 mirror into static rules and
 // rows whose QName cannot be recovered. Static rows are the ones
 // expandAllowOutEntry would have written with a zero expiry: a plain CIDR
-// (prefix <= 32, port 0) or an L7 (ip, port)/48 row. Anything else, and every
-// row with a TTL, is kept byte-for-byte in AdoptedDynamic so the next diff
-// does not delete it.
+// (prefix <= 32, port 0), a plain (ip, port)/48 row, or an L7 (ip, port)/48
+// row. Anything else, and every row with a TTL, is kept byte-for-byte in
+// AdoptedDynamic so the next diff does not delete it.
 func adoptAllowInputs(rows []allowMirrorEntry) ([]AllowOutRule, []allowMirrorEntry) {
 	static := make([]allowMirrorEntry, 0, len(rows))
 	var adopted []allowMirrorEntry
@@ -1292,9 +1295,12 @@ func staticAllowMirrorRow(e allowMirrorEntry) bool {
 
 // allowOutFromStaticMirror folds expanded allow_out_v3 rows back into the
 // AllowOut rules expandAllowOutEntry reproduces. L7 port rows for one IP
-// become one rule. When that rule has netPolicyFlagL3Allowed, the companion
-// any-port /32 row is the one expand would emit with the L7 and L3 bits
-// cleared, and it is not also emitted as its own plain rule.
+// become one rule. A plain /48 row (Flags=0, Scheme=0) is a port-pinned L4
+// allow and becomes its own rule with the port preserved; folding it into the
+// L7 group would widen it back to an any-port /32 on the next expand. When an
+// L7 rule has netPolicyFlagL3Allowed, the companion any-port /32 row is the one
+// expand would emit with the L7 and L3 bits cleared, and it is not also emitted
+// as its own plain rule.
 func allowOutFromStaticMirror(rows []allowMirrorEntry) []AllowOutRule {
 	type l7Group struct {
 		flags uint8
@@ -1308,8 +1314,13 @@ func allowOutFromStaticMirror(rows []allowMirrorEntry) []AllowOutRule {
 	}
 	plains := make(map[plainKey]allowMirrorEntry, len(rows))
 	var plainOrder []plainKey
+	var portRules []AllowOutRule
 
 	for _, e := range rows {
+		if e.Prefixlen == 48 && e.Flags == 0 && e.Scheme == 0 {
+			portRules = append(portRules, AllowOutRule{CIDR: e.IP + "/32", Port: e.Port})
+			continue
+		}
 		if e.Prefixlen == 48 {
 			g := groups[e.IP]
 			if g == nil {
@@ -1329,7 +1340,8 @@ func allowOutFromStaticMirror(rows []allowMirrorEntry) []AllowOutRule {
 	}
 
 	consumed := make(map[plainKey]struct{}, len(groupOrder))
-	out := make([]AllowOutRule, 0, len(groupOrder)+len(plainOrder))
+	out := make([]AllowOutRule, 0, len(portRules)+len(groupOrder)+len(plainOrder))
+	out = append(out, portRules...)
 	for _, ip := range groupOrder {
 		g := groups[ip]
 		sort.Slice(g.ports, func(i, j int) bool {

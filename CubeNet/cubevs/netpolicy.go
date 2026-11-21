@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -25,7 +26,10 @@ var alwaysDeniedSandboxCIDRs = []string{
 var alwaysDeniedSandboxEntries = mustBuildDenyOutPolicyEntries(alwaysDeniedSandboxCIDRs)
 
 type allowOutPolicyEntry struct {
-	key   lpmKey
+	key lpmKey
+	// port is host byte order; 0 means every port. A non-zero port is a plain
+	// L4 allow and expands to exactly one (ip, port)/48 row.
+	port  uint16
 	flags uint8
 	// ports holds the (port, scheme) tuples this entry expands into, one exact
 	// (ip, port)/48 row each — see expandAllowOutEntry. Empty means the default
@@ -33,6 +37,14 @@ type allowOutPolicyEntry struct {
 	// value: net_policy_value_v3 carries only flags, scheme and expiry.
 	ports  []l7PortEntry
 	source string
+}
+
+// allowOutEntryKey identifies a dedup/replace unit: the LPM prefix plus the
+// optional L4 port. A /32 any-port rule and a /32:port rule are distinct and
+// must coexist.
+type allowOutEntryKey struct {
+	key  lpmKey
+	port uint16
 }
 
 type denyOutPolicyEntry struct {
@@ -414,6 +426,30 @@ func parseCIDR(s string) (lpmKey, error) {
 	return lpmKey{Prefixlen: uint32(ones), IP: ipToUint32(ipNet.IP)}, nil
 }
 
+// parseAllowOutTarget parses one allow_out IPv4 target: "IP", "IP/prefix",
+// "IP:port" or "IP/32:port". port is host byte order and 0 means every port.
+// A port is only meaningful on a single host: the datapath compares it at
+// prefixlen 48, so there is no CIDR+port row to emit for a shorter prefix.
+func parseAllowOutTarget(target string) (lpmKey, uint16, error) {
+	host, portStr, hasPort := strings.Cut(target, ":")
+	var port uint16
+	if hasPort {
+		p, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil || p == 0 {
+			return lpmKey{}, 0, fmt.Errorf("invalid allow_out port in %q: must be a single port in [1, 65535]", target) //nolint:err113
+		}
+		port = uint16(p)
+	}
+	key, err := parseCIDR(host)
+	if err != nil {
+		return lpmKey{}, 0, err
+	}
+	if port != 0 && key.Prefixlen != 32 {
+		return lpmKey{}, 0, fmt.Errorf("invalid allow_out target %q: a port is only supported on a single host (/32)", target) //nolint:err113
+	}
+	return key, port, nil
+}
+
 func mustBuildDenyOutPolicyEntries(cidrs []string) []denyOutPolicyEntry {
 	entries, err := buildDenyOutPolicyEntries(cidrs)
 	if err != nil {
@@ -422,22 +458,24 @@ func mustBuildDenyOutPolicyEntries(cidrs []string) []denyOutPolicyEntry {
 	return entries
 }
 
-func buildAllowOutPolicyEntries(allowOutCIDRs []string) ([]allowOutPolicyEntry, error) {
-	entries := make([]allowOutPolicyEntry, 0, len(allowOutCIDRs))
-	indexByKey := make(map[lpmKey]int, len(allowOutCIDRs))
+func buildAllowOutPolicyEntries(allowOutTargets []string) ([]allowOutPolicyEntry, error) {
+	entries := make([]allowOutPolicyEntry, 0, len(allowOutTargets))
+	indexByKey := make(map[allowOutEntryKey]int, len(allowOutTargets))
 
-	for _, cidr := range allowOutCIDRs {
-		key, err := parseCIDR(cidr)
+	for _, target := range allowOutTargets {
+		key, port, err := parseAllowOutTarget(target)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := indexByKey[key]; ok {
+		ek := allowOutEntryKey{key: key, port: port}
+		if _, ok := indexByKey[ek]; ok {
 			continue
 		}
-		indexByKey[key] = len(entries)
+		indexByKey[ek] = len(entries)
 		entries = append(entries, allowOutPolicyEntry{
 			key:    key,
-			source: cidr,
+			port:   port,
+			source: target,
 		})
 	}
 	return entries, nil
@@ -677,6 +715,12 @@ func buildDenyOutPolicyEntries(cidrs []string) ([]denyOutPolicyEntry, error) {
 	entries := make([]denyOutPolicyEntry, 0, len(cidrs))
 	seen := make(map[lpmKey]struct{}, len(cidrs))
 	for _, cidr := range cidrs {
+		// deny_out is IPv4-only and carries no port. A colon can only be an
+		// IPv6 literal or a port suffix; reject it here rather than letting
+		// parseCIDR silently truncate an IPv6 address to its last four bytes.
+		if strings.Contains(cidr, ":") {
+			return nil, fmt.Errorf("invalid deny_out target %q: IPv4 only, no port", cidr) //nolint:err113
+		}
 		key, err := parseCIDR(cidr)
 		if err != nil {
 			return nil, err
@@ -796,19 +840,20 @@ func mergeAllowOutWithL7(base, l7 []allowOutPolicyEntry) []allowOutPolicyEntry {
 	if len(l7) == 0 {
 		return base
 	}
-	byKey := make(map[lpmKey]int, len(base)+len(l7))
+	byKey := make(map[allowOutEntryKey]int, len(base)+len(l7))
 	out := make([]allowOutPolicyEntry, 0, len(base)+len(l7))
 	for _, e := range base {
-		byKey[e.key] = len(out)
+		byKey[allowOutEntryKey{key: e.key, port: e.port}] = len(out)
 		out = append(out, e)
 	}
 	for _, e := range l7 {
-		if idx, ok := byKey[e.key]; ok {
+		ek := allowOutEntryKey{key: e.key, port: e.port}
+		if idx, ok := byKey[ek]; ok {
 			out[idx].flags |= e.flags | netPolicyFlagL3Allowed
 			out[idx].ports = e.ports
 			continue
 		}
-		byKey[e.key] = len(out)
+		byKey[ek] = len(out)
 		out = append(out, e)
 	}
 	return out
@@ -1035,9 +1080,17 @@ func splitAllowOutTargets(targets []string) ([]string, []string, error) {
 		if target == "" {
 			return nil, nil, fmt.Errorf("invalid allow_out target: empty") //nolint:err113
 		}
-		if isIPv4Target(target) {
+		if isIPv4TargetWithOptionalPort(target) {
+			if _, _, err := parseAllowOutTarget(target); err != nil {
+				return nil, nil, err
+			}
 			cidrs = append(cidrs, target)
 			continue
+		}
+		// Anything still carrying a colon is an IPv6 literal, an IPv6 CIDR or
+		// a domain:port. None is a valid allow_out target.
+		if strings.Contains(target, ":") {
+			return nil, nil, fmt.Errorf("invalid allow_out target: %s", target) //nolint:err113
 		}
 		if strings.Contains(target, "/") {
 			return nil, nil, fmt.Errorf("invalid allow_out CIDR target: %s", target) //nolint:err113
@@ -1051,6 +1104,16 @@ func splitAllowOutTargets(targets []string) ([]string, []string, error) {
 		domains = append(domains, target)
 	}
 	return cidrs, domains, nil
+}
+
+// isIPv4TargetWithOptionalPort reports whether target is an IPv4 literal/CIDR
+// with an optional ":port" suffix, before the port grammar is validated.
+func isIPv4TargetWithOptionalPort(target string) bool {
+	host, _, hasPort := strings.Cut(target, ":")
+	if hasPort {
+		return isIPv4Target(host)
+	}
+	return isIPv4Target(target)
 }
 
 func isIPv4Target(target string) bool {
@@ -1157,7 +1220,8 @@ type allowOutRow struct {
 // becomes one exact (ip, port)/48 row per (port, scheme) tuple — an empty port
 // set means the default {80/http, 443/https} — plus, when the host is also in
 // plain allow_out (netPolicyFlagL3Allowed), the any-port row that keeps L3
-// access on every other port. A plain entry is a single any-port row.
+// access on every other port. A plain entry is a single any-port row, or a
+// single (ip, port)/48 row when it pins a port.
 //
 // Shared by the static and the DNS-learned paths (see learnedAllowOutRows), so
 // a learned row and a static row for the same host can never expand to
@@ -1171,6 +1235,14 @@ func expandAllowOutEntry(entry allowOutPolicyEntry) []allowOutRow {
 		}
 	}
 	if entry.flags&netPolicyFlagL7Required == 0 {
+		if entry.port != 0 {
+			// Plain L4 allow: the datapath compares the port at prefixlen 48,
+			// so this is exactly one (ip, port)/48 row with no L7 marker.
+			return []allowOutRow{{
+				key: lpmKeyV3{Prefixlen: 48, IP: entry.key.IP, Port: htonsPort(entry.port)},
+				val: netPolicyValueV3{Flags: entry.flags, KeyPrefixlen: 48},
+			}}
+		}
 		return []allowOutRow{plainRow(entry.flags)}
 	}
 

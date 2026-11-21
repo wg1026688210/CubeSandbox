@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -111,6 +112,12 @@ func validateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	if err := validateAllowOutTargets(cfg.AllowOut); err != nil {
+		return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
+	if err := validateDenyOutTargets(cfg.DenyOut); err != nil {
+		return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
+	}
 	if cfg.MaskRequestHost != nil {
 		if err := validateMaskRequestHost(*cfg.MaskRequestHost); err != nil {
 			return ret.Err(errorcode.ErrorCode_MasterParamsError, err.Error())
@@ -125,6 +132,141 @@ func validateCubeNetworkConfig(cfg *types.CubeNetworkConfig) error {
 		}
 	}
 	return nil
+}
+
+// validateAllowOutTargets rejects the same allow_out shapes CubeVS rejects, so
+// an invalid target answers a parameter error here instead of reaching the node
+// and surfacing as a 500. Accepted: IPv4 literal/CIDR, "IP:port" or
+// "IP/32:port" (one port in [1, 65535]), and a domain without a port. A port on
+// a prefix shorter than /32 and every IPv6 form are rejected.
+func validateAllowOutTargets(targets []string) error {
+	for _, raw := range targets {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			return fmt.Errorf("invalid allow_out target: empty")
+		}
+		host, portStr, hasPort := strings.Cut(target, ":")
+		if hasPort {
+			if !isIPv4Host(host) {
+				return fmt.Errorf("invalid allow_out target: %s", target)
+			}
+			if err := validateSinglePort(portStr); err != nil {
+				return fmt.Errorf("invalid allow_out target %q: %w", target, err)
+			}
+			prefix, err := ipv4PrefixLen(host)
+			if err != nil {
+				return fmt.Errorf("invalid allow_out target %q: %w", target, err)
+			}
+			if prefix != 32 {
+				return fmt.Errorf("invalid allow_out target %q: a port is only supported on a single host (/32)", target)
+			}
+			continue
+		}
+		if isIPv4Host(target) {
+			continue
+		}
+		if strings.Contains(target, "/") {
+			return fmt.Errorf("invalid allow_out CIDR target: %s", target)
+		}
+		if net.ParseIP(target) != nil || isDottedDecimalLike(target) {
+			return fmt.Errorf("unsupported allow_out IP target: %s", target)
+		}
+		if !isAllowOutDomainName(target) {
+			return fmt.Errorf("invalid allow_out domain target: %s", target)
+		}
+	}
+	return nil
+}
+
+// validateDenyOutTargets keeps deny_out IPv4-only: a colon is either an IPv6
+// literal or a port suffix, neither of which deny_out supports.
+func validateDenyOutTargets(targets []string) error {
+	for _, raw := range targets {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			return fmt.Errorf("invalid deny_out target: empty")
+		}
+		if strings.Contains(target, ":") {
+			return fmt.Errorf("invalid deny_out target %q: IPv4 only, no port", target)
+		}
+		if !isIPv4Host(target) {
+			return fmt.Errorf("invalid deny_out target %q: IPv4 only", target)
+		}
+	}
+	return nil
+}
+
+func isIPv4Host(host string) bool {
+	if strings.Contains(host, "/") {
+		ip, _, err := net.ParseCIDR(host)
+		return err == nil && ip.To4() != nil
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() != nil
+}
+
+func ipv4PrefixLen(host string) (int, error) {
+	if strings.Contains(host, "/") {
+		_, ipNet, err := net.ParseCIDR(host)
+		if err != nil {
+			return 0, err
+		}
+		ones, _ := ipNet.Mask.Size()
+		return ones, nil
+	}
+	if net.ParseIP(host) == nil {
+		return 0, fmt.Errorf("invalid IPv4 address: %s", host)
+	}
+	return 32, nil
+}
+
+func validateSinglePort(port string) error {
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return fmt.Errorf("port must be a single value in [1, 65535]")
+	}
+	return nil
+}
+
+func isDottedDecimalLike(target string) bool {
+	parts := strings.Split(strings.TrimSuffix(target, "."), ".")
+	if len(parts) != net.IPv4len {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isAllowOutDomainName(target string) bool {
+	domain := strings.ToLower(strings.TrimSuffix(target, "."))
+	if strings.HasPrefix(domain, "*.") {
+		domain = domain[2:]
+	} else if strings.Contains(domain, "*") {
+		return false
+	}
+	if domain == "" || len(domain) >= 255 {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, ch := range label {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // validateEgressRuleMatch enforces the port/scheme contract on one egress
