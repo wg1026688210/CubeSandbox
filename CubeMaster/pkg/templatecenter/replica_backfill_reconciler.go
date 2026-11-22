@@ -206,9 +206,31 @@ func backfillTemplateReplicas(ctx context.Context, def backfillDefinition) error
 		"template_id": def.TemplateID,
 		"artifact_id": artifact.ArtifactID,
 	})
-	_, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing, true)
+	readyTargets, _, ready, failed, distErr := backfillDistribute(ctx, &req, &generatedReq, artifact, def.TemplateID, job.JobID, missing, true)
 	logger.Infof("template replica backfill: %d node(s) missing a READY replica, distributed ready=%d failed=%d err=%v",
 		len(missing), ready, failed, distErr)
+	// Distribute only lands the artifact; run the prepare step so the row
+	// converges to READY. Failed prepares are persisted and only logged;
+	// distErr is reported unchanged.
+	for _, target := range readyTargets {
+		if target == nil {
+			continue
+		}
+		replica, _ := createReplicaOnNode(ctx, target, def.TemplateID, &generatedReq, replicaRunOptions{
+			ArtifactID: artifact.ArtifactID,
+			JobID:      job.JobID,
+		})
+		if upsertErr := UpsertReplica(ctx, def.TemplateID, generatedReq.InstanceType, replica); upsertErr != nil {
+			logger.Warnf("template replica backfill: persist prepare result fail, template=%s node=%s err=%v",
+				def.TemplateID, target.ID(), upsertErr)
+			continue
+		}
+		if replica.Status != ReplicaStatusReady {
+			logger.Warnf("template replica backfill: prepare replica fail, template=%s node=%s err=%s",
+				def.TemplateID, target.ID(), replica.ErrorMessage)
+			continue
+		}
+	}
 	return distErr
 }
 
