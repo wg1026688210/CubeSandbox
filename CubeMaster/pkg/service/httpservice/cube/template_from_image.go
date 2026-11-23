@@ -59,9 +59,16 @@ func handleRedoTemplateAction(c *gin.Context) {
 		})
 		return
 	}
-	rt.RequestID = req.RequestID
+	// req.Request is an embedded pointer: a body without request_id leaves it
+	// nil, and both uses below would nil-deref before validation could reject
+	// the request (issue #2192).
+	requestID := ""
+	if req.Request != nil {
+		requestID = req.RequestID
+	}
+	rt.RequestID = requestID
 	ctx := log.WithLogger(c.Request.Context(), log.G(c.Request.Context()).WithFields(map[string]any{
-		"RequestId":  req.RequestID,
+		"RequestId":  requestID,
 		"Action":     "RedoTemplate",
 		"TemplateID": req.TemplateID,
 	}))
@@ -71,7 +78,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 	job, err := redoTemplateFromImageFn(ctx, req, requestBaseURL(c.Request))
 	if err != nil {
 		common.WriteAPI(c, &types.CreateTemplateFromImageRes{
-			RequestID: req.RequestID,
+			RequestID: requestID,
 			Ret: &types.Ret{
 				RetCode: int(errorcode.ErrorCode_MasterParamsError),
 				RetMsg:  err.Error(),
@@ -87,7 +94,7 @@ func handleRedoTemplateAction(c *gin.Context) {
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	common.WriteAPI(c, &types.CreateTemplateFromImageRes{
-		RequestID: req.RequestID,
+		RequestID: requestID,
 		Ret: &types.Ret{
 			RetCode: int(errorcode.ErrorCode_Success),
 			RetMsg:  "success",
